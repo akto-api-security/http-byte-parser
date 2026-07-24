@@ -28,7 +28,8 @@ RUN set -eu; \
       arm64) CC=aarch64-linux-gnu-gcc ;; \
       *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    "$CC" -O3 -pthread cfast.c -o /out/cfast
+    "$CC" -O3 -pthread -I. common.c cfast.c -o /out/cfast
+# (cfast-simd is arm64-only via NEON; the portable scalar cfast is what ships in the image)
 
 FROM debian:bookworm-slim
 WORKDIR /app

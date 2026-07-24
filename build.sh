@@ -24,11 +24,13 @@ build_local() {
     echo "   built bin/$cmd"
   done
 
-  echo ">> C binaries ($CC -O3) -> bin/"
-  "$CC" -O3 -pthread cfast/cfast.c -o "$BIN/cfast"
+  echo ">> C binaries ($CC -O3, shared common.c harness) -> bin/"
+  "$CC" -O3 -pthread -Icfast cfast/common.c cfast/cfast.c -o "$BIN/cfast"
   echo "   built bin/cfast"
-  "$CC" -O3 -pthread pico-neon/bench_neon.c pico-neon/picohttpparser.c -o "$BIN/bench_neon"
-  echo "   built bin/bench_neon"
+  "$CC" -O3 -pthread -Icfast cfast/common.c cfast/cfast-simd.c -o "$BIN/cfast-simd"
+  echo "   built bin/cfast-simd"
+  "$CC" -O3 -pthread -Icfast -Ipico-neon cfast/common.c cfast/pico-adapter.c pico-neon/picohttpparser.c -o "$BIN/pico"
+  echo "   built bin/pico"
 
   echo ">> done. binaries in $BIN:"
   ls -1 "$BIN"

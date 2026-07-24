@@ -22,11 +22,13 @@ run_local() {
   local out; out="$(mktemp -d)"
   echo ">> building Go bench (pure Go) + cfast (C) ..."
   ( cd go-approach && CGO_ENABLED=0 go build -trimpath -o "$out/bench" ./cmd/bench )
-  "${CC:-cc}" -O3 -pthread cfast/cfast.c -o "$out/cfast"
+  "${CC:-cc}" -O3 -pthread -Icfast cfast/common.c cfast/cfast.c -o "$out/cfast"
+  "${CC:-cc}" -O3 -pthread -Icfast cfast/common.c cfast/cfast-simd.c -o "$out/cfast-simd"
   echo ">> host: $(uname -sm), $(sysctl -n hw.logicalcpu 2>/dev/null || nproc) CPUs"
   echo
   FIXTURES="$HERE/fixtures" "$out/bench"
   FIXTURES="$HERE/fixtures" "$out/cfast"
+  FIXTURES="$HERE/fixtures" "$out/cfast-simd"
   rm -rf "$out"
 }
 
