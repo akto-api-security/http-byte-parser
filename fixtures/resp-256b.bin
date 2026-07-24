@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+Accept: application/json
+Accept-Encoding: gzip
+Content-Type: application/json
+User-Agent: traffic-gen/1.0
+X-Debug-Token: test-req-buuf-test-runtime:24:07:26:02:30:55-request-9
+Date: Thu, 23 Jul 2026 21:00:55 GMT
+Content-Length: 243
+
+{"status":"success","message":"Data payload received","code":200,"data":{"id":101,"active":true,"reading":23.5,"hash":"a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"},"meta":{"timestamp":1719766500,"device":"MQTT-Node-01","firmware":"v2.1.0","errors":[]}}

@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpparser-bench
+  labels:
+    app: httpparser-bench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: httpparser-bench
+  template:
+    metadata:
+      labels:
+        app: httpparser-bench
+    spec:
+      containers:
+        - name: bench
+          image: gauravakto/http-byte-parser:latest
+          imagePullPolicy: Always
+          # Image ENTRYPOINT is `sleep infinity`, so the pod stays Running.
+          # Get the table with:
+          #   kubectl exec deploy/httpparser-bench -- /app/bench
+          env:
+            - name: FIXTURES
+              value: /app/fixtures
+          resources:
+            requests:
+              cpu: "1"
+              memory: "128Mi"
+            limits:
+              cpu: "2"
+              memory: "256Mi"
+          # Liveness: the process is alive as long as `sleep` runs.
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pidof sleep >/dev/null"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]

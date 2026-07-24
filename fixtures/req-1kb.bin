@@ -1,0 +1,28 @@
+POST /?request-num=9 HTTP/1.1
+Host: localhost:8888
+User-Agent: traffic-gen/1.0
+Content-Length: 1021
+Accept: application/json
+Content-Type: application/json
+X-Debug-Token: test-req-buuf-test-runtime:24:07:26:02:30:55-request-9
+Accept-Encoding: gzip
+
+[
+  {
+    "reviewID": "R26GJW65W9X4OB",
+    "name": "HebeZ",
+    "date": "March 9, 2025",
+    "verifiedPurchase": "True",
+    "rating": "4.0",
+    "helpful": "12",
+    "title": "Solid Smart Glasses with Room for Improvement",
+    "review": "The Ray-Ban Meta Glasses in the classic Wayfarer style are an impressive step forward in smart eyewear. The design stays true to the iconic Ray-Ban look, making them stylish and easy to wear daily. The built-in camera and speakers provide a seamless hands-free experience for capturing moments and taking calls without pulling out your phone.<br>The audio quality is suproisingly good for spe",
+    "profile": "https://www.amazon.com/gp/profile/amzn1.account.AHB27IWMWVLAD54XVISCCOCFACBA/ref=cm_cr_getr_d_gw_btm",
+    "country": "United States",
+    "reviewLink": "https://www.amazon.com/gp/customer-reviews/R26GJW65W9X4OB/ref=cm_cr_getr_d_rvw_ttl",
+    "reviewImage": "",
+    "helpful_aug": "15",
+    "is_positive_review": "1",
+    "helpfulness_score": "6.048931686665876"
+  }
+]

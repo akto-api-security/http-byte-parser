@@ -1,0 +1,30 @@
+# build output
+/bin/
+
+# compiled binaries (produced by build.sh / cc / go build)
+cfast/cfast
+cfast/cfast-simd
+pico-neon/bench_neon
+simdjson-approach/bench
+sonic-approach/bench
+sonic-approach/bench_lazy
+
+# stray go binaries built next to their cmd/ sources
+/go-approach/bench
+/go-approach/orchestrate
+/go-approach/shapebench
+
+# macOS debug bundles
+*.dSYM/
+
+# go test/build artifacts
+*.test
+*.out
+
+# profiles & traces
+*.prof
+*.trace
+
+# OS / editor junk
+.DS_Store
+*.swp

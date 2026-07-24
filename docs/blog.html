@@ -1,0 +1,369 @@
+<title>Slicing bytes into requests — a Go &amp; C parsing deep-dive</title>
+<style>
+  :root {
+    --bg:#0d1220; --surface:#141b29; --surface-2:#1a2333; --border:#28324a;
+    --text:#e7edf5; --muted:#93a3ba; --faint:#5c6c85;
+    --accent:#f2a63b;        /* amber — speed / heat */
+    --accent-2:#48c6d8;      /* cyan — data */
+    --good:#4ade80; --bad:#f2696b;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,sans-serif;
+    --measure: 66ch;
+    --r:10px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#eef1f6; --surface:#ffffff; --surface-2:#e7edf4; --border:#d3dce8;
+      --text:#141d2b; --muted:#4f6076; --faint:#8494a8;
+      --accent:#b96b12; --accent-2:#128aa0; --good:#128a4a; --bad:#c93b3b;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1220; --surface:#141b29; --surface-2:#1a2333; --border:#28324a;
+    --text:#e7edf5; --muted:#93a3ba; --faint:#5c6c85;
+    --accent:#f2a63b; --accent-2:#48c6d8; --good:#4ade80; --bad:#f2696b;
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f6; --surface:#ffffff; --surface-2:#e7edf4; --border:#d3dce8;
+    --text:#141d2b; --muted:#4f6076; --faint:#8494a8;
+    --accent:#b96b12; --accent-2:#128aa0; --good:#128a4a; --bad:#c93b3b;
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+    font-size:17px;
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:0 24px}
+  .col{max-width:var(--measure); margin-inline:auto}
+
+  h1,h2,h3,.mono,.eyebrow,.label,.stat-num,.bar-val,code,pre{font-family:var(--mono)}
+  h2{font-size:1.55rem; letter-spacing:-.01em; text-wrap:balance; margin:0 0 .2em}
+  h3{font-size:1.05rem; letter-spacing:.01em; margin:0 0 .4em}
+  p{margin:0 0 1.1em}
+  a{color:var(--accent-2)}
+  strong{color:var(--text); font-weight:650}
+  .eyebrow{font-size:.72rem; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin:0 0 .8em}
+  .muted{color:var(--muted)}
+
+  /* ---- hero ---- */
+  header.hero{
+    border-bottom:1px solid var(--border);
+    background:
+      radial-gradient(120% 90% at 85% -10%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 60%),
+      radial-gradient(90% 80% at 0% 0%, color-mix(in oklab, var(--accent-2) 12%, transparent), transparent 55%);
+  }
+  .hero-inner{padding:74px 0 60px}
+  .hero h1{
+    font-size:clamp(2.1rem,5.4vw,3.5rem); line-height:1.04; letter-spacing:-.02em;
+    margin:.1em 0 .5em; text-wrap:balance; font-weight:680;
+  }
+  .hero h1 .hl{color:var(--accent)}
+  .hero .lede{font-size:1.18rem; color:var(--muted); max-width:60ch}
+  .krow{display:flex; flex-wrap:wrap; gap:14px; margin-top:30px}
+  .kpi{
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--r);
+    padding:14px 18px; min-width:150px;
+  }
+  .kpi .n{font-family:var(--mono); font-size:1.55rem; font-weight:650; color:var(--accent); font-variant-numeric:tabular-nums}
+  .kpi .n.cy{color:var(--accent-2)}
+  .kpi .k{font-size:.74rem; text-transform:uppercase; letter-spacing:.12em; color:var(--faint); margin-top:2px}
+
+  /* ---- raw request viz ---- */
+  .rawcard{
+    margin-top:34px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--r); overflow:hidden;
+  }
+  .rawcard .top{display:flex; gap:8px; align-items:center; padding:11px 16px; border-bottom:1px solid var(--border); background:var(--surface-2)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .rawcard .top .t{margin-left:8px; font-family:var(--mono); font-size:.78rem; color:var(--muted)}
+  pre.raw{
+    margin:0; padding:18px 16px; font-size:.82rem; line-height:1.85; overflow-x:auto;
+    white-space:pre; color:var(--muted);
+  }
+  .tok{border-radius:4px; padding:1px 4px; color:var(--bg); font-weight:600}
+  :root[data-theme="dark"] .tok, :root:not([data-theme="light"]) .tok{color:#0d1220}
+  .t-method{background:var(--accent)}
+  .t-path{background:var(--accent-2)}
+  .t-ver{background:#8b7ff0}
+  .t-hname{background:#5fb974}
+  .t-hval{background:#d98cc4}
+  .rawlegend{display:flex; flex-wrap:wrap; gap:14px; padding:12px 16px; border-top:1px solid var(--border); font-family:var(--mono); font-size:.72rem}
+  .rawlegend span{display:inline-flex; align-items:center; gap:6px; color:var(--muted)}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  /* ---- sections ---- */
+  section{padding:58px 0}
+  section + section{border-top:1px solid var(--border)}
+  .sec-head{margin-bottom:28px}
+
+  /* ---- progression ---- */
+  .steps{display:flex; flex-direction:column; gap:0}
+  .step{display:grid; grid-template-columns:44px 1fr; gap:18px; padding:18px 0; border-top:1px dashed var(--border)}
+  .step:first-child{border-top:none}
+  .step .idx{font-family:var(--mono); color:var(--faint); font-size:.9rem; padding-top:2px}
+  .step .body h3{display:flex; flex-wrap:wrap; align-items:baseline; gap:10px}
+  .step .rate{margin-left:auto; font-family:var(--mono); font-weight:650; color:var(--accent); font-variant-numeric:tabular-nums; font-size:1rem}
+  .step .rate.win{color:var(--good)}
+  .step .rate.bad{color:var(--bad)}
+  .tagrow{display:flex; gap:7px; flex-wrap:wrap; margin-top:8px}
+  .tag{font-family:var(--mono); font-size:.68rem; letter-spacing:.03em; padding:2px 8px; border-radius:20px; border:1px solid var(--border); color:var(--muted); background:var(--surface)}
+  .tag.c{border-color:color-mix(in oklab,var(--accent-2) 45%,var(--border)); color:var(--accent-2)}
+  .tag.warn{border-color:color-mix(in oklab,var(--bad) 45%,var(--border)); color:var(--bad)}
+
+  /* ---- bar chart ---- */
+  .chart{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:22px 22px 10px}
+  .chart .ctitle{font-family:var(--mono); font-size:.8rem; letter-spacing:.04em; color:var(--muted); margin-bottom:18px; display:flex; justify-content:space-between}
+  .bar{display:grid; grid-template-columns:132px 1fr; gap:14px; align-items:center; margin-bottom:15px}
+  .bar .bl{font-family:var(--mono); font-size:.78rem; text-align:right; color:var(--text)}
+  .bar .bl small{display:block; color:var(--faint); font-size:.66rem}
+  .track{position:relative; height:26px; background:var(--surface-2); border-radius:6px; overflow:hidden}
+  .fill{position:absolute; inset:0 auto 0 0; width:var(--w); border-radius:6px;
+    background:linear-gradient(90deg, color-mix(in oklab,var(--accent) 70%, var(--accent-2)), var(--accent));
+    transition:width 1.1s cubic-bezier(.2,.8,.2,1);}
+  .fill.cy{background:linear-gradient(90deg, color-mix(in oklab,var(--accent-2) 80%, #6a8cf0), var(--accent-2))}
+  .fill.slow{background:linear-gradient(90deg,#7a4a4a,var(--bad))}
+  .bar-val{position:absolute; right:10px; top:50%; transform:translateY(-50%); font-size:.76rem; font-weight:650; color:var(--text); font-variant-numeric:tabular-nums; mix-blend-mode:normal}
+  @media (prefers-reduced-motion: reduce){ .fill{transition:none} }
+
+  /* ---- technique cards ---- */
+  .grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:16px}
+  .tcard{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:20px}
+  .tcard .th{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .tcard .th .g{font-family:var(--mono); font-size:.7rem; padding:3px 8px; border-radius:5px; background:var(--surface-2); color:var(--accent); letter-spacing:.05em}
+  .tcard p{font-size:.93rem; margin:0; color:var(--muted)}
+  .tcard p strong{color:var(--text)}
+
+  /* ---- table ---- */
+  .tablewrap{overflow-x:auto; border:1px solid var(--border); border-radius:var(--r)}
+  table{border-collapse:collapse; width:100%; font-size:.86rem; min-width:520px}
+  th,td{padding:11px 14px; text-align:left; border-bottom:1px solid var(--border)}
+  th{font-family:var(--mono); font-size:.7rem; text-transform:uppercase; letter-spacing:.1em; color:var(--faint); background:var(--surface-2)}
+  td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right}
+  tbody tr:last-child td{border-bottom:none}
+  tr .win{color:var(--good); font-weight:650}
+  tr .bad{color:var(--bad)}
+  .ck{color:var(--good)} .cx{color:var(--bad)}
+
+  /* ---- callout ---- */
+  .callout{border-left:3px solid var(--accent); background:var(--surface); border-radius:0 var(--r) var(--r) 0; padding:18px 22px; margin:8px 0}
+  .callout.warn{border-left-color:var(--bad)}
+  .callout h3{color:var(--accent); margin-bottom:.3em}
+  .callout.warn h3{color:var(--bad)}
+  .callout p{margin:0; color:var(--muted); font-size:.95rem}
+
+  .takeaways{list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:14px}
+  .takeaways li{display:grid; grid-template-columns:26px 1fr; gap:12px; align-items:start}
+  .takeaways .n{font-family:var(--mono); color:var(--accent); font-weight:650}
+  .takeaways b{color:var(--text)}
+
+  footer{border-top:1px solid var(--border); padding:30px 0 50px; color:var(--faint); font-family:var(--mono); font-size:.78rem}
+
+  code{background:var(--surface-2); padding:1px 6px; border-radius:5px; font-size:.86em; color:var(--accent-2)}
+  .lede code{background:transparent; padding:0}
+</style>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <p class="eyebrow">Systems performance · Go &amp; C</p>
+    <h1>Turning a raw <span class="hl">[]byte</span> into an HTTP request, as fast as the machine allows</h1>
+    <p class="lede">A traffic pipeline was pinning every CPU at ~30k request/response pairs per second. The culprit wasn't the network — it was <code>http.ReadRequest</code> allocating its way into the garbage collector. This is the story of parsing HTTP by <em>slicing</em> instead of <em>copying</em>, across seven implementations in two languages.</p>
+
+    <div class="krow">
+      <div class="kpi"><div class="n">16×</div><div class="k">faster parse (Go)</div></div>
+      <div class="kpi"><div class="n cy">0</div><div class="k">allocations / parse</div></div>
+      <div class="kpi"><div class="n">~48M</div><div class="k">parses/sec (C ceiling)</div></div>
+      <div class="kpi"><div class="n cy">1</div><div class="k">buffer, never copied</div></div>
+    </div>
+
+    <div class="rawcard" role="img" aria-label="A raw HTTP request buffer with each field highlighted as a slice into the same bytes">
+      <div class="top">
+        <span class="dot" style="background:#f2696b"></span><span class="dot" style="background:#f2a63b"></span><span class="dot" style="background:#4ade80"></span>
+        <span class="t">receiveBuffer []byte — one contiguous allocation</span>
+      </div>
+<pre class="raw"><span class="tok t-method">POST</span> <span class="tok t-path">/?request-num=9</span> <span class="tok t-ver">HTTP/1.1</span>\r\n
+<span class="tok t-hname">Host</span>: <span class="tok t-hval">localhost:8888</span>\r\n
+<span class="tok t-hname">Content-Length</span>: <span class="tok t-hval">1021</span>\r\n
+<span class="tok t-hname">Content-Type</span>: <span class="tok t-hval">application/json</span>\r\n
+\r\n
+<span class="muted">[ { "reviewID": "R26GJW65W9X4OB", … 1021 bytes of body … } ]</span></pre>
+      <div class="rawlegend">
+        <span><i class="sw t-method"></i>method</span>
+        <span><i class="sw t-path"></i>target</span>
+        <span><i class="sw t-ver"></i>version</span>
+        <span><i class="sw t-hname"></i>header name</span>
+        <span><i class="sw t-hval"></i>header value</span>
+        <span class="muted">— every field is an <code>(offset, len)</code> window into the buffer above. Zero copies.</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap col">
+    <div class="sec-head"><p class="eyebrow">The problem</p><h2>Why the stock parser is the bottleneck</h2></div>
+    <p>Go's <code>http.ReadRequest</code> is general and correct — it streams from a <code>bufio.Reader</code>, builds a <code>map[string][]string</code> of headers, parses a <code>url.URL</code>, and hands you a live body reader. For a server that's exactly right. For a pipeline that already holds the <strong>complete message in one <code>[]byte</code></strong> and just needs the fields out, it's ~16 allocations and ~1.25&nbsp;KB of garbage <em>per message</em>.</p>
+    <p>At 30k pairs/sec that allocation firehose kept the garbage collector running on every core — a CPU profile of the production pipeline showed <strong>over half the time in <code>mallocgc</code> and GC</strong>, with parsing and <code>json.Marshal</code> as the two ~21% giants. The parse was never slow because the <em>algorithm</em> was slow; it was slow because it <em>allocated</em>.</p>
+    <div class="callout">
+      <h3>The whole idea</h3>
+      <p>The bytes are already in memory. Don't copy them into strings and maps — record where each field <em>starts and ends</em>, and decode lazily only what you read. A parsed field becomes a slice pointing back into the original buffer.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <div class="sec-head"><p class="eyebrow">The progression</p><h2>Seven parsers, two languages</h2>
+    <p class="muted" style="font-size:.95rem">Single-core, 1&nbsp;KB message, Apple&nbsp;M-series (arm64). Each step is a real implementation we built and benchmarked in order.</p></div>
+
+    <div class="steps">
+      <div class="step"><div class="idx">01</div><div class="body">
+        <h3>Go · <code>net/http</code> baseline <span class="rate bad">1.0 M/s</span></h3>
+        <p class="muted">Stream through <code>bufio</code>, build the header map, read the body. Correct and safe — and 16 allocations of garbage per parse.</p>
+        <div class="tagrow"><span class="tag">stdlib</span><span class="tag warn">16 allocs</span><span class="tag">GC-bound</span></div>
+      </div></div>
+
+      <div class="step"><div class="idx">02</div><div class="body">
+        <h3>Go · scalar hand-roll <span class="rate">6 M/s</span></h3>
+        <p class="muted">Walk the bytes once, store <code>(offset,len)</code> slices, no <code>http.Request</code>. Byte-at-a-time delimiter search.</p>
+        <div class="tagrow"><span class="tag">zero-copy</span><span class="tag">0 allocs</span></div>
+      </div></div>
+
+      <div class="step"><div class="idx">03</div><div class="body">
+        <h3>Go · SIMD scan <span class="rate">14 M/s</span></h3>
+        <p class="muted">Swap the byte loop for <code>bytes.IndexByte</code> — the stdlib's hand-tuned SIMD <code>memchr</code>. 2.2× for free, on any arch.</p>
+        <div class="tagrow"><span class="tag">NEON / AVX2</span><span class="tag">0 allocs</span></div>
+      </div></div>
+
+      <div class="step"><div class="idx">04</div><div class="body">
+        <h3>Go · packed offsets — <em>shipped</em> <span class="rate win">16 M/s</span></h3>
+        <p class="muted">Store header positions as <code>uint32</code> pairs instead of slice headers; ~4× less memory traffic per header. Safe, portable, 0-alloc. This is what went to production.</p>
+        <div class="tagrow"><span class="tag">zero-copy</span><span class="tag">0 allocs</span><span class="tag c">errors, never panics</span></div>
+      </div></div>
+
+      <div class="step"><div class="idx">05</div><div class="body">
+        <h3>C · picohttpparser <span class="rate">13 M/s</span></h3>
+        <p class="muted">The famous h2o parser. On <em>x86</em> its SSE4.2 SIMD shines — but on ARM that path is compiled out, so it runs scalar <em>and</em> validates every byte. It merely <em>matches</em> well-written Go here.</p>
+        <div class="tagrow"><span class="tag c">C</span><span class="tag">validates input</span><span class="tag warn">x86-only SIMD</span></div>
+      </div></div>
+
+      <div class="step"><div class="idx">06</div><div class="body">
+        <h3>C · <code>cfast</code> — the ceiling <span class="rate win">~48 M/s</span></h3>
+        <p class="muted">Apple's NEON-tuned <code>memchr</code> for every delimiter, and <strong>no validation</strong>. Three times faster than anything else — and it <em>segfaults</em> on a single malformed byte.</p>
+        <div class="tagrow"><span class="tag c">C</span><span class="tag">memchr</span><span class="tag warn">crashes on bad input</span></div>
+      </div></div>
+
+      <div class="step"><div class="idx">07</div><div class="body">
+        <h3>C · picohttpparser + NEON port <span class="rate">13 M/s</span></h3>
+        <p class="muted">We ported h2o's <code>PCMPESTRI</code> range-scan to ARM NEON (there's no equivalent instruction — it takes a <code>vshrn</code>+<code>ctz</code> trick). It works, but header lines are too short for 16-byte SIMD to beat Apple's wide scalar core. No gain.</p>
+        <div class="tagrow"><span class="tag c">C · NEON</span><span class="tag">honest negative result</span></div>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="col sec-head"><p class="eyebrow">The numbers</p><h2>Throughput, measured</h2>
+    <p class="muted" style="font-size:.95rem">Parses per second — higher is better. All zero-copy parsers are allocation-free; <code>net/http</code> is not.</p></div>
+
+    <div class="chart" id="chart1">
+      <div class="ctitle"><span>SINGLE CORE · 1 KB message</span><span>parses / sec</span></div>
+      <div class="bar"><div class="bl">net/http<small>16 allocs</small></div><div class="track"><div class="fill slow" style="--w:2%"><span class="bar-val">1.0 M</span></div></div></div>
+      <div class="bar"><div class="bl">Go scalar<small>0 allocs</small></div><div class="track"><div class="fill" style="--w:12.5%"><span class="bar-val">6 M</span></div></div></div>
+      <div class="bar"><div class="bl">Go SIMD<small>0 allocs</small></div><div class="track"><div class="fill" style="--w:29%"><span class="bar-val">14 M</span></div></div></div>
+      <div class="bar"><div class="bl">Go shipped<small>0 allocs · safe</small></div><div class="track"><div class="fill" style="--w:33%"><span class="bar-val">16 M</span></div></div></div>
+      <div class="bar"><div class="bl">pico (C)<small>scalar on ARM</small></div><div class="track"><div class="fill cy" style="--w:27%"><span class="bar-val">13 M</span></div></div></div>
+      <div class="bar"><div class="bl">cfast (C)<small>no validation</small></div><div class="track"><div class="fill cy" style="--w:100%"><span class="bar-val">48 M</span></div></div></div>
+    </div>
+
+    <div style="height:16px"></div>
+
+    <div class="chart" id="chart2">
+      <div class="ctitle"><span>ALL 10 CORES · 1 KB message</span><span>parses / sec (aggregate)</span></div>
+      <div class="bar"><div class="bl">net/http</div><div class="track"><div class="fill slow" style="--w:0.8%"><span class="bar-val">2 M</span></div></div></div>
+      <div class="bar"><div class="bl">Go shipped</div><div class="track"><div class="fill" style="--w:33%"><span class="bar-val">85 M</span></div></div></div>
+      <div class="bar"><div class="bl">cfast (C)</div><div class="track"><div class="fill cy" style="--w:100%"><span class="bar-val">260 M</span></div></div></div>
+      <div class="ctitle" style="margin:6px 0 0"><span class="muted" style="letter-spacing:0; text-transform:none; font-family:var(--sans)">net/http barely scales — its per-parse garbage turns extra cores into extra GC, not throughput.</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <div class="sec-head"><p class="eyebrow">Techniques</p><h2>What actually moved the needle</h2></div>
+    <div class="grid2">
+      <div class="tcard"><div class="th"><span class="g">CORE</span><h3>Zero-copy slices</h3></div>
+        <p>A field is a <strong>window</strong> into the buffer — <code>buf[i:j]</code>, a pointer and a length. No sub-strings, no header map. The single biggest win: from ~16 allocations to <strong>zero</strong>.</p></div>
+      <div class="tcard"><div class="th"><span class="g">SCAN</span><h3>SIMD delimiter search</h3></div>
+        <p>Finding <code>\r\n</code> and <code>:</code> is the hot loop. <strong><code>bytes.IndexByte</code></strong> (Go) and <strong><code>memchr</code></strong> (C) are hand-tuned vector assembly — 16–32 bytes per instruction. 2.2× over a scalar loop.</p></div>
+      <div class="tcard"><div class="th"><span class="g">LAYOUT</span><h3>Packed offsets</h3></div>
+        <p>Store header positions as four <code>uint32</code>s, not two 24-byte slice headers. ~4× less memory written per header keeps the cache hot and the allocator idle.</p></div>
+      <div class="tcard"><div class="th"><span class="g">ENCODE</span><h3>Hand-rolled JSON</h3></div>
+        <p>The output stage mattered as much as the parse. Skipping <code>json.Marshal</code> + the header maps and appending bytes straight into a pooled buffer cut the encoder from 44 allocations to <strong>0</strong>.</p></div>
+      <div class="tcard"><div class="th"><span class="g">TRADE</span><h3>Validation is not free</h3></div>
+        <p><code>cfast</code>'s 3× lead was mostly the cost of <em>safety</em> it skipped. A real traffic parser must reject malformed input, not crash on it — so we escape invalid UTF-8 and return errors, and accept the slower number.</p></div>
+      <div class="tcard"><div class="th"><span class="g">BRIDGE</span><h3>The cgo tax</h3></div>
+        <p>Calling the fast C parser <em>from</em> Go cost ~40–250&nbsp;ns at the boundary — larger than the 20&nbsp;ns parse itself. Per-message cgo erased the win entirely; only batching thousands per call helps.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <div class="sec-head"><p class="eyebrow">Go vs C</p><h2>Which language wins?</h2></div>
+    <p>The surprising answer on Apple Silicon: <strong>well-written Go matched or beat stock C.</strong> Go's <code>bytes.IndexByte</code> carries SIMD for <em>both</em> amd64 and arm64 and picks the right one at runtime — while picohttpparser's SIMD is <code>#ifdef __SSE4_2__</code>, x86-only, leaving ARM on a scalar path.</p>
+    <p>C's real ceiling (<code>cfast</code>, ~48 M/s) came from two things Go can't easily do: inlining <code>memchr</code> so the whole parse schedules as one unit, and dropping validation. Go can't inline assembly — every SIMD call is a hard boundary — so it plateaus around 16 M/s single-core. But that plateau ships safely, portably, and allocation-free.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Parser</th><th>Lang</th><th class="num">1 core</th><th class="num">allocs</th><th>Safe?</th><th>SIMD</th></tr></thead>
+        <tbody>
+          <tr><td>net/http</td><td>Go</td><td class="num">1.0 M/s</td><td class="num">16</td><td class="ck">✓ graceful</td><td>—</td></tr>
+          <tr><td><strong>httpparser (shipped)</strong></td><td>Go</td><td class="num win">16 M/s</td><td class="num win">0</td><td class="ck">✓ errors</td><td>NEON + AVX2</td></tr>
+          <tr><td>picohttpparser</td><td>C</td><td class="num">13 M/s</td><td class="num">n/a</td><td class="ck">✓ validates</td><td>x86 only</td></tr>
+          <tr><td>pico + Cloudflare AVX2</td><td>C</td><td class="num">×1.7 <span class="muted">(x86)</span></td><td class="num">n/a</td><td class="ck">✓ validates</td><td>AVX2 (x86)</td></tr>
+          <tr><td>cfast</td><td>C</td><td class="num win">48 M/s</td><td class="num">n/a</td><td class="cx">✗ segfaults</td><td>memchr</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn" style="margin-top:22px">
+      <h3>The 48 M/s trap</h3>
+      <p>The fastest number is unusable. <code>cfast</code> assumes perfect input; on a truncated packet or missing <code>\r\n</code> it dereferences a null and takes the whole process down. For untrusted captured traffic, "returns an error" beats "3× faster and crashes."</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <div class="sec-head"><p class="eyebrow">In the pipeline</p><h2>The win that actually mattered</h2></div>
+    <p>Raw parse speed was a red herring. At the production rate of ~30k pairs/sec, the shipped Go pipeline uses <strong>~2% of one core</strong> — the same workload that saturated every core with <code>net/http</code>. The lever was never nanoseconds; it was going from <strong>~100 allocations per pair to zero</strong>, which drained the GC that was eating the CPU.</p>
+    <p>The full path — parse both buffers, shape the Kafka JSON, all in one allocation-free pass — replaced <code>http.ReadRequest</code>&nbsp;+&nbsp;header maps&nbsp;+&nbsp;<code>json.Marshal</code> and turned a CPU-bound service back into an idle one.</p>
+    <ul class="takeaways">
+      <li><span class="n">→</span><div><b>Profile before you optimize.</b> The bottleneck was the garbage collector, not the parser. A 3× faster parse would have changed nothing; killing allocations changed everything.</div></li>
+      <li><span class="n">→</span><div><b>Zero-copy &gt; clever SIMD.</b> Slicing instead of copying beat every micro-optimization. The allocation model dominates the instruction count.</div></li>
+      <li><span class="n">→</span><div><b>The fastest code isn't shippable if it's unsafe.</b> <code>cfast</code> proved the ceiling; the safe Go parser is what runs.</div></li>
+      <li><span class="n">→</span><div><b>Modern Go is not the slow one.</b> Runtime-dispatched SIMD in the stdlib made portable, safe, GC'd Go competitive with hand-written C.</div></li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap col">
+    raw []byte → http request · benchmarked on Apple M-series (arm64) &amp; x86 AKS nodes · Go 1.25 · single-core figures at 1&nbsp;KB body unless noted · numbers are representative, not a controlled lab result.
+  </div>
+</footer>
+
+<script>
+  // grow bars when scrolled into view (respects reduced-motion via CSS transition removal)
+  const bars = document.querySelectorAll('.fill');
+  bars.forEach(f => { const w = f.style.getPropertyValue('--w'); f.style.setProperty('--w','0%'); f.dataset.w = w; });
+  const io = new IntersectionObserver((es)=>{
+    es.forEach(e=>{ if(e.isIntersecting){ e.target.querySelectorAll('.fill').forEach(f=>{ requestAnimationFrame(()=>f.style.setProperty('--w', f.dataset.w)); }); io.unobserve(e.target);} });
+  },{threshold:.25});
+  document.querySelectorAll('.chart').forEach(c=>io.observe(c));
+</script>
