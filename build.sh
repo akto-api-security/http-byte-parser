@@ -19,7 +19,7 @@ BIN="$HERE/bin"
 build_local() {
   mkdir -p "$BIN"
   echo ">> Go binaries (CGO off, pure Go) -> bin/"
-  for cmd in bench orchestrate shapebench; do
+  for cmd in bench orchestrate; do
     ( cd go-approach && CGO_ENABLED=0 go build -trimpath -o "$BIN/$cmd" "./cmd/$cmd" )
     echo "   built bin/$cmd"
   done

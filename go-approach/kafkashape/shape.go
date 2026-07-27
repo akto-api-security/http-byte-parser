@@ -1,192 +1,30 @@
-// Package kafkashape turns raw (request, response) byte buffers into the Kafka
-// JSON payload.
+// Package kafkashape encodes parsed HTTP (from httpparser) into the Akto Kafka
+// JSON payload — hand-rolled, zero-allocation, single pass. Output is always
+// valid JSON: invalid UTF-8 in bodies is replaced with U+FFFD and control chars
+// are escaped.
 //
-//   - BuildFull  — the production path: hand-rolled, zero-alloc, emits every key.
-//   - BuildDirect — hand-rolled, HTTP-derived keys only.
-//   - Build      — sonic + maps/struct; kept as a backup, not the hot path.
+// Integration is parse-then-encode:
 //
-// All encoders escape JSON correctly, including repairing invalid UTF-8 (bodies
-// may contain arbitrary bytes), so the output is always valid JSON.
+//	b := kafkashape.NewBuilder()          // one per goroutine — NOT concurrency-safe
+//	p := b.Parser()
+//	req,  _ := p.ParseRequest(reqBuf)
+//	resp, _ := p.ParseResponse(respBuf)
+//	out := b.Encode(req, resp, meta)      // Kafka JSON
+//	method, path, host := req.Method, req.Path, req.Host()  // already parsed — free
 //
-// Concurrency: a Builder is NOT safe for concurrent use — it holds a reusable
-// parser and output buffer. Use one Builder per goroutine (or a sync.Pool).
+// The returned bytes alias the Builder's internal buffer; copy (e.g. string(out))
+// before the next Encode on the same Builder.
 package kafkashape
 
 import (
-	"log"
 	"strconv"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
 	"goapproach/httpparser"
 )
 
-// Pair is one raw request+response to process (the bytes straight off the wire).
-type Pair struct {
-	Req  []byte
-	Resp []byte
-}
-
-// Stats reports how a batch went.
-type Stats struct {
-	OK     int
-	Failed int
-}
-
-// ProcessPairs is the batch orchestrator: for each (req, resp) pair it parses and
-// builds the Kafka JSON, skipping malformed pairs (logged + counted), and returns
-// a fresh copy of the JSON for each success. Uses a single Builder (this call is
-// single-goroutine); use one ProcessPairs call per goroutine.
-//
-// Note: BuildFull returns a slice aliasing the Builder's internal buffer, so each
-// result is COPIED before the next iteration overwrites it. For a produce-and-
-// forget hot path, prefer ProcessPairsFunc to avoid retaining every payload.
-func ProcessPairs(pairs []Pair, m *Meta) ([][]byte, Stats) {
-	b := NewBuilder()
-	out := make([][]byte, 0, len(pairs))
-	var st Stats
-	for i := range pairs {
-		js, err := b.BuildFull(pairs[i].Req, pairs[i].Resp, m)
-		if err != nil {
-			st.Failed++
-			log.Printf("kafkashape: skipping pair %d: %v", i, err)
-			continue
-		}
-		out = append(out, append([]byte(nil), js...)) // copy: js aliases builder scratch
-		st.OK++
-	}
-	return out, st
-}
-
-// ProcessPairsFunc is the streaming variant: it calls fn with each pair's Kafka
-// JSON as it's produced (no copy, no retention — fn must consume/copy before
-// returning, e.g. produce to Kafka or string(js)). Malformed pairs are skipped.
-func ProcessPairsFunc(pairs []Pair, m *Meta, fn func(js []byte)) Stats {
-	b := NewBuilder()
-	var st Stats
-	for i := range pairs {
-		js, err := b.BuildFull(pairs[i].Req, pairs[i].Resp, m)
-		if err != nil {
-			st.Failed++
-			log.Printf("kafkashape: skipping pair %d: %v", i, err)
-			continue
-		}
-		fn(js)
-		st.OK++
-	}
-	return st
-}
-
-// Payload is the backup (sonic) representation. StatusCode is a string to match
-// the hand-rolled encoders and the legacy map[string]string data.
-type Payload struct {
-	Method          string            `json:"method"`
-	Path            string            `json:"path"`
-	Type            string            `json:"type"`
-	StatusCode      string            `json:"statusCode"`
-	Status          string            `json:"status"`
-	RequestHeaders  map[string]string `json:"requestHeaders"`
-	ResponseHeaders map[string]string `json:"responseHeaders"`
-	RequestPayload  string            `json:"requestPayload"`
-	ResponsePayload string            `json:"responsePayload"`
-}
-
-// Builder pairs a reusable Parser with a reusable output buffer. NOT safe for
-// concurrent use; use one per goroutine.
-type Builder struct {
-	p       *httpparser.Parser
-	payload Payload
-	scratch []byte
-}
-
-func NewBuilder() *Builder {
-	return &Builder{p: httpparser.New(), scratch: make([]byte, 0, 8192)}
-}
-
-// statusText returns "<code>" or "<code> <reason>" (no trailing space when the
-// reason phrase is empty).
-func statusText(code int, reason []byte) string {
-	if len(reason) == 0 {
-		return strconv.Itoa(code)
-	}
-	return strconv.Itoa(code) + " " + string(reason)
-}
-
-// Build (BACKUP, sonic). Returns freshly-allocated bytes, safe to retain.
-func (b *Builder) Build(reqBuf, respBuf []byte) ([]byte, error) {
-	req, err := b.p.ParseRequest(reqBuf)
-	if err != nil {
-		return nil, err
-	}
-	reqHeaders := make(map[string]string, len(req.Headers))
-	for _, h := range req.Headers {
-		reqHeaders[string(h.Name)] = string(h.Value)
-	}
-	method := string(req.Method)
-	path := string(req.Path)
-	version := string(req.Version)
-	reqBody := string(req.Body)
-
-	resp, err := b.p.ParseResponse(respBuf)
-	if err != nil {
-		return nil, err
-	}
-	respHeaders := make(map[string]string, len(resp.Headers))
-	for _, h := range resp.Headers {
-		respHeaders[string(h.Name)] = string(h.Value)
-	}
-	respBody := string(resp.Body)
-
-	b.payload = Payload{
-		Method:          method,
-		Path:            path,
-		Type:            version,
-		StatusCode:      strconv.Itoa(resp.StatusCode),
-		Status:          statusText(resp.StatusCode, resp.Reason),
-		RequestHeaders:  reqHeaders,
-		ResponseHeaders: respHeaders,
-		RequestPayload:  reqBody,
-		ResponsePayload: respBody,
-	}
-	return sonic.Marshal(&b.payload)
-}
-
-// BuildDirect (hand-rolled, HTTP keys only). The returned slice aliases the
-// Builder's internal buffer and is only valid until the next Build*/BuildDirect
-// call — copy it (e.g. string(out)) before reusing the Builder.
-// Duplicate header names are preserved as duplicate JSON keys (lossless).
-func (b *Builder) BuildDirect(reqBuf, respBuf []byte) ([]byte, error) {
-	req, err := b.p.ParseRequest(reqBuf)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := b.p.ParseResponse(respBuf)
-	if err != nil {
-		return nil, err
-	}
-
-	buf := b.scratch[:0]
-	buf = append(buf, `{"method":`...)
-	buf = appendJSONString(buf, req.Method)
-	buf = kv(buf, "path", req.Path)
-	buf = kv(buf, "type", req.Version)
-	buf = kvStatusCode(buf, resp.StatusCode)
-	buf = append(buf, `,"status":`...)
-	buf = appendStatus(buf, resp.StatusCode, resp.Reason)
-	buf = append(buf, `,"requestHeaders":`...)
-	buf = appendHeaders(buf, req.Headers)
-	buf = append(buf, `,"responseHeaders":`...)
-	buf = appendHeaders(buf, resp.Headers)
-	buf = kv(buf, "requestPayload", req.Body)
-	buf = kv(buf, "responsePayload", resp.Body)
-	buf = append(buf, '}')
-
-	b.scratch = buf
-	return buf, nil
-}
-
-// Meta holds the non-parsed fields (from TrafficContext + globals). Values are
-// emitted as strings to match the legacy map[string]string data.
+// Meta holds the non-parsed fields (from TrafficContext + globals). Emitted as
+// strings to match the legacy map[string]string payload data.
 type Meta struct {
 	SourceIP      string // -> "ip"
 	DestIP        string // -> "destIp"
@@ -204,19 +42,23 @@ type Meta struct {
 	Tag           string // -> "tag" (omitted if empty)
 }
 
-// BuildFull (PRODUCTION) — drop-in for parseHTTPTraffic + convertHeaders +
-// buildJSONPayload + json.Marshal on the JSON/Kafka path. Emits every key,
-// zero-alloc, one pass. Same aliasing/ownership rule as BuildDirect.
-func (b *Builder) BuildFull(reqBuf, respBuf []byte, m *Meta) ([]byte, error) {
-	req, err := b.p.ParseRequest(reqBuf)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := b.p.ParseResponse(respBuf)
-	if err != nil {
-		return nil, err
-	}
+// Builder reuses a parser + output buffer. NOT safe for concurrent use — one per goroutine.
+type Builder struct {
+	p       *httpparser.Parser
+	scratch []byte
+}
 
+func NewBuilder() *Builder {
+	return &Builder{p: httpparser.New(), scratch: make([]byte, 0, 8192)}
+}
+
+// Parser exposes the reusable parser so callers can parse first (and read
+// method/path/Host off the result) and then Encode.
+func (b *Builder) Parser() *httpparser.Parser { return b.p }
+
+// Encode writes the Kafka JSON from already-parsed structs into the Builder's
+// reused buffer. Returned bytes are valid until the next Encode on this Builder.
+func (b *Builder) Encode(req *httpparser.Request, resp *httpparser.Response, m *Meta) []byte {
 	buf := b.scratch[:0]
 	buf = append(buf, `{"method":`...)
 	buf = appendJSONString(buf, req.Method)
@@ -231,7 +73,6 @@ func (b *Builder) BuildFull(reqBuf, respBuf []byte, m *Meta) ([]byte, error) {
 	buf = appendHeaders(buf, resp.Headers)
 	buf = kv(buf, "requestPayload", req.Body)
 	buf = kv(buf, "responsePayload", resp.Body)
-	// metadata
 	buf = kvStr(buf, "ip", m.SourceIP)
 	buf = kvStr(buf, "destIp", m.DestIP)
 	buf = kvInt(buf, "time", m.TimeUnix)
@@ -249,16 +90,14 @@ func (b *Builder) BuildFull(reqBuf, respBuf []byte, m *Meta) ([]byte, error) {
 		buf = kvStr(buf, "tag", m.Tag)
 	}
 	buf = append(buf, '}')
-
 	b.scratch = buf
-	return buf, nil
+	return buf
 }
 
-// ---- encoding helpers (all zero-alloc; leading comma assumed) ----
+// ---- JSON encoding helpers (zero-alloc; a leading comma is assumed) ----
 
 func kv(dst []byte, key string, val []byte) []byte {
-	dst = appendKey(dst, key)
-	return appendJSONString(dst, val)
+	return appendJSONString(appendKey(dst, key), val)
 }
 func kvStr(dst []byte, key, val string) []byte {
 	dst = appendKey(dst, key)
@@ -298,7 +137,6 @@ func appendStatus(dst []byte, code int, reason []byte) []byte {
 	}
 	return append(dst, '"')
 }
-
 func appendHeaders(dst []byte, hs []httpparser.Header) []byte {
 	dst = append(dst, '{')
 	for i := range hs {
@@ -311,7 +149,6 @@ func appendHeaders(dst []byte, hs []httpparser.Header) []byte {
 	}
 	return append(dst, '}')
 }
-
 func appendJSONString(dst, s []byte) []byte {
 	dst = append(dst, '"')
 	dst = appendJSONEscaped(dst, s)
@@ -320,12 +157,11 @@ func appendJSONString(dst, s []byte) []byte {
 
 const hexdigits = "0123456789abcdef"
 
-// appendJSONEscaped writes s escaping ", \, control chars (<0x20), and replacing
-// invalid UTF-8 bytes with U+FFFD (�) so the output is always valid JSON.
-// Valid input (incl. valid multibyte UTF-8) takes the allocation-free fast path.
+// appendJSONEscaped escapes ", \, control chars (<0x20), and replaces invalid
+// UTF-8 with U+FFFD so the output is always valid JSON. Valid input takes the
+// allocation-free fast path.
 func appendJSONEscaped(dst, s []byte) []byte {
-	start := 0
-	i := 0
+	start, i := 0, 0
 	for i < len(s) {
 		c := s[i]
 		if c < 0x80 {
@@ -352,10 +188,8 @@ func appendJSONEscaped(dst, s []byte) []byte {
 	return append(dst, s[start:]...)
 }
 
-// appendJSONEscapedStr is the string twin of appendJSONEscaped.
 func appendJSONEscapedStr(dst []byte, s string) []byte {
-	start := 0
-	i := 0
+	start, i := 0, 0
 	for i < len(s) {
 		c := s[i]
 		if c < 0x80 {

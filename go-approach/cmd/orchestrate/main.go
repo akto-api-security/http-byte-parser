@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"goapproach/httpparser"
 	"goapproach/kafkashape"
 )
 
@@ -96,8 +97,16 @@ func main() {
 		}
 		// catch up to the number of pairs we should have processed by now.
 		should := int64(now.Sub(start).Seconds() * float64(rate))
+		p := b.Parser()
 		for done < should {
-			out, err := b.BuildFull(req, resp, meta)
+			rq, err := p.ParseRequest(req)
+			var out []byte
+			if err == nil {
+				var rs *httpparser.Response
+				if rs, err = p.ParseResponse(resp); err == nil {
+					out = b.Encode(rq, rs, meta)
+				}
+			}
 			if err != nil {
 				failed++
 			} else {

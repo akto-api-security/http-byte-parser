@@ -32,6 +32,41 @@ type Request struct {
 	Body    []byte
 }
 
+// Host returns the value of the Host header (zero-copy slice into the buffer),
+// or nil if absent. Case-insensitive on the header name.
+func (r *Request) Host() []byte { return headerValue(r.Headers, "Host") }
+
+// Header returns the first matching header value (case-insensitive), or nil.
+func (r *Request) Header(name string) []byte { return headerValue(r.Headers, name) }
+
+func headerValue(hs []Header, name string) []byte {
+	for i := range hs {
+		if asciiEqualFold(hs[i].Name, name) {
+			return hs[i].Value
+		}
+	}
+	return nil
+}
+
+func asciiEqualFold(b []byte, s string) bool {
+	if len(b) != len(s) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c1, c2 := b[i], s[i]
+		if 'A' <= c1 && c1 <= 'Z' {
+			c1 += 'a' - 'A'
+		}
+		if 'A' <= c2 && c2 <= 'Z' {
+			c2 += 'a' - 'A'
+		}
+		if c1 != c2 {
+			return false
+		}
+	}
+	return true
+}
+
 // Response is the parsed response. All fields alias the input buffer.
 type Response struct {
 	Version    []byte
