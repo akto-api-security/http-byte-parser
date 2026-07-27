@@ -11,11 +11,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	capnp "capnproto.org/go/capnp/v3"
+	"goapproach/httpparser"
 )
+
+// ---- shared helpers (used by correctness_test.go and bench_test.go) ----
 
 var sizes = []string{"256b", "1kb", "4kb", "10kb", "20kb", "64kb"}
 
-// fixtures live at ebpf/testdata; this package is ebpf/httparser/kafkashape.
 func load(t testing.TB, name string) []byte {
 	b, err := os.ReadFile(filepath.Join("..", "..", "fixtures", name))
 	if err != nil {
@@ -33,9 +37,7 @@ func sampleMeta() *Meta {
 	}
 }
 
-func mps(b *testing.B, ops int64) { b.ReportMetric(float64(ops)/b.Elapsed().Seconds()/1e6, "M/s") }
-
-// encode parses reqBuf+respBuf and encodes — the integration path.
+// encode parses reqBuf+respBuf and encodes with the JSON Builder (integration path).
 func encode(t testing.TB, b *Builder, reqBuf, respBuf []byte, m *Meta) []byte {
 	p := b.Parser()
 	req, err := p.ParseRequest(reqBuf)
@@ -49,7 +51,23 @@ func encode(t testing.TB, b *Builder, reqBuf, respBuf []byte, m *Meta) []byte {
 	return b.Encode(req, resp, m)
 }
 
-// ---- all keys + values present ----
+// parsePair parses the fixture pair once and returns the parsed structs plus the
+// total raw input bytes (req+resp message sizes) — the denominator for GiB/s.
+func parsePair(t testing.TB, size string) (*httpparser.Request, *httpparser.Response, int64) {
+	reqBuf, respBuf := load(t, "req-"+size+".bin"), load(t, "resp-"+size+".bin")
+	p := httpparser.New()
+	req, err := p.ParseRequest(reqBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.ParseResponse(respBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req, resp, int64(len(reqBuf) + len(respBuf))
+}
+
+// ---- JSON encoder: all keys + values present ----
 
 func TestEncode(t *testing.T) {
 	out := encode(t, NewBuilder(), load(t, "req-1kb.bin"), load(t, "resp-1kb.bin"), sampleMeta())
@@ -166,44 +184,50 @@ func TestEmptyReasonNoTrailingSpace(t *testing.T) {
 	}
 }
 
-// ---- benchmarks: full parse+encode, single-core and all-cores ----
+// ---- binary formats: frame decodes back to the input fields ----
 
-func BenchmarkEncode(b *testing.B) {
+func TestRoundTrip(t *testing.T) {
+	req, resp, _ := parsePair(t, "1kb")
 	m := sampleMeta()
-	for _, s := range sizes {
-		reqB, respB := load(b, "req-"+s+".bin"), load(b, "resp-"+s+".bin")
-		bld := NewBuilder()
-		p := bld.Parser()
-		b.Run(s, func(b *testing.B) {
-			b.ReportAllocs()
-			var n int64
-			for i := 0; i < b.N; i++ {
-				req, _ := p.ParseRequest(reqB)
-				resp, _ := p.ParseResponse(respB)
-				_ = len(bld.Encode(req, resp, m))
-				n++
-			}
-			mps(b, n)
-		})
-	}
-}
 
-func BenchmarkEncodeParallel(b *testing.B) {
-	m := sampleMeta()
-	for _, s := range sizes {
-		reqB, respB := load(b, "req-"+s+".bin"), load(b, "resp-"+s+".bin")
-		b.Run(s, func(b *testing.B) {
-			b.ReportAllocs()
-			b.RunParallel(func(pb *testing.PB) {
-				bld := NewBuilder()
-				p := bld.Parser()
-				for pb.Next() {
-					req, _ := p.ParseRequest(reqB)
-					resp, _ := p.ParseResponse(respB)
-					_ = len(bld.Encode(req, resp, m))
-				}
-			})
-			mps(b, int64(b.N))
-		})
-	}
+	t.Run("flatbuffers", func(t *testing.T) {
+		out := NewFBEncoder().Encode(req, resp, m)
+		fb := GetRootAsFbHttpPair(out, 0)
+		if string(fb.MethodBytes()) != string(req.Method) ||
+			string(fb.PathBytes()) != string(req.Path) ||
+			int(fb.StatusCode()) != resp.StatusCode ||
+			string(fb.ReqBodyBytes()) != string(req.Body) ||
+			string(fb.RespBodyBytes()) != string(resp.Body) ||
+			fb.ReqHeadersLength() != len(req.Headers) ||
+			string(fb.SourceIp()) != m.SourceIP {
+			t.Fatal("flatbuffers round-trip mismatch")
+		}
+	})
+
+	t.Run("capnp", func(t *testing.T) {
+		out := NewCapnpEncoder().Encode(req, resp, m)
+		msg, err := capnp.Unmarshal(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cp, err := ReadRootCpHttpPair(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		method, _ := cp.Method()
+		path, _ := cp.Path()
+		rb, _ := cp.ReqBody()
+		sb, _ := cp.RespBody()
+		rh, _ := cp.ReqHeaders()
+		sip, _ := cp.SourceIp()
+		if string(method) != string(req.Method) ||
+			string(path) != string(req.Path) ||
+			int(cp.StatusCode()) != resp.StatusCode ||
+			string(rb) != string(req.Body) ||
+			string(sb) != string(resp.Body) ||
+			rh.Len() != len(req.Headers) ||
+			sip != m.SourceIP {
+			t.Fatal("capnp round-trip mismatch")
+		}
+	})
 }

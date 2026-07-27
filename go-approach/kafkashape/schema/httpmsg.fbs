@@ -1,0 +1,37 @@
+// FlatBuffers layout for one HTTP request/response pair + meta.
+// Types are Fb-prefixed so they can share the kafkashape package with capnp.
+namespace kafkashape;
+
+table FbHeader {
+  name:[ubyte];
+  value:[ubyte];
+}
+
+table FbHttpPair {
+  method:[ubyte];
+  path:[ubyte];
+  version:[ubyte];
+  status_code:int;
+  reason:[ubyte];
+  req_headers:[FbHeader];
+  resp_headers:[FbHeader];
+  req_body:[ubyte];
+  resp_body:[ubyte];
+
+  source_ip:string;
+  dest_ip:string;
+  akto_account_id:string;
+  source:string;
+  daemonset_id:string;
+  process_name:string;
+  tag:string;
+  time_unix:long;
+  vxlan_id:int;
+  direction:int;
+  process_id:uint;
+  socket_id:uint;
+  is_pending:bool;
+  enable_graph:bool;
+}
+
+root_type FbHttpPair;

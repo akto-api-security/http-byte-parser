@@ -9,6 +9,10 @@ int cf_scalar_resp(const char*, size_t, int*, int*, int*, int*, int, int*, int*)
 int cf_simd_req(const char*, size_t, int*, int*, int*, int*, int, int*, int*);
 int cf_simd_resp(const char*, size_t, int*, int*, int*, int*, int, int*, int*);
 
+// cshape encoder (defined in cshape_shim.c): parse both + encode, returns len,
+// sets *outp to the C-owned reused buffer (Go copies it).
+int cshape_encode_pair(const char*, size_t, const char*, size_t, char**);
+
 // shared: map a parsed http_msg into flat offset arrays for Go.
 static inline int cparse_fill(http_msg *m, const char *buf, int *no, int *nl,
                               int *vo, int *vl, int maxh, int *bodyOff, int *bodyLen) {
